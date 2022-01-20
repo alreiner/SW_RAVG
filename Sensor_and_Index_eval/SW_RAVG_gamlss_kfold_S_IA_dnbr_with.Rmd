@@ -1,0 +1,300 @@
+---
+title: "SW RAVG gamlss with kfold June 2021"
+author: "Alicia Reiner"
+date: "7/12/2021"
+output: 
+  html_document: 
+    keep_md: yes
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Load Data and Packages
+
+first load field data
+
+then load PI dataset
+
+rescale CBI data so BEZI Gam distribution can be used (needs 0-1)
+
+I did not include code to calc dCC as combination of adj1.FVSVU and TreeCCloss - intend to split out PI data and run PI vs. feild data separately. 
+
+```{r Southwest RAVG}
+SWRAVG_field=read.csv("RAVG_V18_field.csv",header=TRUE, sep=",")
+
+CBI.B<-((1/3)*(SWRAVG_field$CBI-3)+1)
+SWRAVG_field<-cbind(CBI.B,SWRAVG_field)
+
+#remove outlier
+SWRAVG_field<-SWRAVG_field[-which(SWRAVG_field$Plot=="BLUE11"),]
+
+library(gamlss)
+library(ggplot2) 
+library(caret)
+library(GenKern)
+#had to install an older version of caret as package was not recognizing confMatrix()
+
+#fix data types up front
+SWRAVG_field$BPScode<-as.factor(SWRAVG_field$BPScode)
+
+```
+
+
+
+### Partition data for k-fold
+
+not creating folds based on stratified random because intend to apply data to new fires
+
+Trying to do the kfolds without the 'createFolds' function from caret because it was only assigning 12 obs to test sets.  
+
+```{r SW RAVG create folds}
+
+set.seed(123)
+
+#randomly shuffle data
+SWRAVG_field<-SWRAVG_field[sample(nrow(SWRAVG_field)),]
+
+#create folds
+folds_f<-cut(seq(1,nrow(SWRAVG_field)),breaks=7,labels=FALSE)
+
+```
+
+### Create fitted values, accuracies and Kappa
+
+Create predicted values of the response variable for the reserve dataset in order to calcualte confusion matrices, accuracies and kappa. 
+
+Gamlss phrases nu and tau as odds.  The code below converts these odds of nu or tau into probabilities of 0 or 1, respectively. The predicted values are computed using the continuous response (mu) as well as the probability of zero or one.   
+
+```{r SW RAVG CBI gamlss accuracies}
+
+
+#also run the simplest model for comparison
+
+#set up blank lists to store results
+CBI.S.Ac<-c()
+CBI.S.K<-c()
+CBI.testMSE.S<-c()
+CBI.AIC.S<-c()
+
+#create a blank vector to hold ifelse predictions, aka, predictions with asymptotes
+CBI.pred.S.if<-999
+
+for(i in 1:7){
+
+  #Segement your data by fold using the which() function 
+    testIndexes <- which(folds_f==i,arr.ind=TRUE)
+    SWRAVG_field_test <- SWRAVG_field[testIndexes, ]
+    SWRAVG_field_train <- SWRAVG_field[-testIndexes, ]
+
+CBI.simple<-gamlss(formula=CBI.B~S_IA_dnbr_with, nu.formula=~S_IA_dnbr_with, tau.formula=~S_IA_dnbr_with,family=BEINF,data=na.omit(SWRAVG_field_train))
+
+# extract new predictions for BEINF gamlss parameters for simple model
+  CBI.simple.predAll <- predictAll(CBI.simple, newdata=SWRAVG_field_test, type="response") 
+  mu.CBI.s <- CBI.simple.predAll$mu
+  nu.CBI.s <- CBI.simple.predAll$nu
+  tau.CBI.s <- CBI.simple.predAll$tau
+  p0.CBI.s <- nu.CBI.s / (1+nu.CBI.s+tau.CBI.s) # probability of zeros
+  p1.CBI.s <- tau.CBI.s / (1+nu.CBI.s+tau.CBI.s) # probability of ones
+
+# calculate expected value for new predictions
+yest.CBI.s.gamlss <- (1-p0.CBI.s)*(p1.CBI.s+(1-p1.CBI.s)*mu.CBI.s)
+
+
+#first categorize the reserve CBI data (the CBI.B variable on 0-1 scale)
+SWRAVG_field_test$CBI.cat=cut(SWRAVG_field_test$CBI.B,
+              breaks=c(-Inf,0.0329,0.415,0.749,Inf),
+                labels=c("0-<0.1","0.1-<1.25","1.25-<2.25","2.25-3"))
+
+#then categorize the predicted data  
+yest.CBI.s.cat=cut(yest.CBI.s.gamlss,
+        breaks=c(-Inf,0.0329,0.415,0.749,Inf),
+                labels=c("0-<0.1","0.1-<1.25","1.25-<2.25","2.25-3"))
+
+
+CBI.testMSE.S.0<-mean((SWRAVG_field_test$CBI.B-yest.CBI.s.gamlss)^2) 
+CBI.testMSE.S<-c(CBI.testMSE.S,CBI.testMSE.S.0)
+CBI.AIC.S.0<-AIC(CBI.simple)
+CBI.AIC.S<-c(CBI.AIC.S,CBI.AIC.S.0)
+
+#Create Confusion Matrix
+CBI.S.conf<-confusionMatrix(yest.CBI.s.cat, SWRAVG_field_test$CBI.cat,  dnn = c("Prediction", "Reference"))
+print(CBI.S.conf)
+
+#access accuracy and Kappa
+CBI.conf.S.ac<-CBI.S.conf$overall["Accuracy"]
+CBI.conf.S.K<-CBI.S.conf$overall["Kappa"]
+
+#add accuracy and Kappa to lists
+CBI.S.Ac<-c(CBI.S.Ac,CBI.conf.S.ac)
+CBI.S.K<-c(CBI.S.K,CBI.conf.S.K)
+
+plot(yest.CBI.s.gamlss,SWRAVG_field_test$CBI.B, xlab="yest for simple gamlss on model set", ylab="actual", main = "predicted vs actual values of CBI for simple gamlss with limits")
+
+}
+
+#average the results across folds and calc standard error
+mean(CBI.S.Ac)
+sd(CBI.S.Ac)/sqrt(length(CBI.S.Ac))
+mean(CBI.S.K)
+mean(CBI.testMSE.S)
+mean(CBI.AIC.S)
+
+
+```
+
+
+### Create fitted values, accuracies and Kappa for BA
+
+Create predicted values of the response variable for the reserve dataset in order to calcualte confusion matrices, accuracies and kappa. 
+
+Gamlss phrases nu and tau as odds.  The code below converts these odds of nu or tau into probabilities of 0 or 1, respectively. The predicted values are computed using the continuous response (mu) as well as the probability of zero or one.   
+
+```{r SW RAVG BA gamlss accuracies}
+
+#also run the simplest model for comparison
+
+#set up blank lists to store results
+BA.S.Ac<-c()
+BA.S.K<-c()
+BA.testMSE.S<-c()
+BA.AIC.S<-c()
+
+#create a blank vector to hold ifelse predictions, aka, predictions with asymptotes
+BA.pred.S.if<-999
+
+for(i in 1:7){
+
+  #Segement your data by fold using the which() function 
+    testIndexes <- which(folds_f==i,arr.ind=TRUE)
+    SWRAVG_field_test <- SWRAVG_field[testIndexes, ]
+    SWRAVG_field_train <- SWRAVG_field[-testIndexes, ]
+
+BA.simple<-gamlss(formula=pdBA~S_IA_dnbr_with, sigma.formula=~S_IA_dnbr_with,nu.formula=~S_IA_dnbr_with, tau.formula=~S_IA_dnbr_with,family=BEINF,data=na.omit(SWRAVG_field_train))
+
+# extract new predictions for BEINF gamlss parameters for simple model
+  BA.simple.predAll <- predictAll(BA.simple, newdata=SWRAVG_field_test, type="response") 
+  mu.BA.s <- BA.simple.predAll$mu
+  nu.BA.s <- BA.simple.predAll$nu
+  tau.BA.s <- BA.simple.predAll$tau
+  p0.BA.s <- nu.BA.s / (1+nu.BA.s+tau.BA.s) # probability of zeros
+  p1.BA.s <- tau.BA.s / (1+nu.BA.s+tau.BA.s) # probability of ones
+
+# calculate expected value for new predictions for simple model
+yest.BA.s.gamlss <- (1-p0.BA.s)*(p1.BA.s+(1-p1.BA.s)*mu.BA.s)
+
+BA.testMSE.S.0<-mean((SWRAVG_field_test$pdBA-yest.BA.s.gamlss)^2) 
+BA.testMSE.S<-c(BA.testMSE.S,BA.testMSE.S.0)
+BA.AIC.S.0<-AIC(BA.simple)
+BA.AIC.S<-c(BA.AIC.S,BA.AIC.S.0)
+
+#first categorize the reserve pdBA data 
+SWRAVG_field_test$pdBA.cat=cut(SWRAVG_field_test$pdBA,
+                           breaks=c(-Inf,0.0999,0.24999,0.4999,0.74999,0.8999, Inf),
+                labels=c("0-<10%","10-<25%","25-<50%","50-<75%","75-<90%","90-100%"))
+#then categorize the predicted data  
+yest.BA.s.cat=cut(yest.BA.s.gamlss,
+        breaks=c(-Inf,0.0999,0.24999,0.4999,0.74999,0.8999, Inf),
+                labels=c("0-<10%","10-<25%","25-<50%","50-<75%","75-<90%","90-100%"))
+
+#Create Confusion Matrix
+BA.S.conf<-confusionMatrix(yest.BA.s.cat, SWRAVG_field_test$pdBA.cat,  dnn = c("Prediction", "Reference"))
+print(BA.S.conf)
+
+#access accuracy and Kappa
+BA.conf.S.ac<-BA.S.conf$overall["Accuracy"]
+BA.conf.S.K<-BA.S.conf$overall["Kappa"]
+
+#add accuracy and Kappa to lists
+BA.S.Ac<-c(BA.S.Ac,BA.conf.S.ac)
+BA.S.K<-c(BA.S.K,BA.conf.S.K)
+}
+
+#average the results across folds
+mean(BA.S.Ac)
+sd(BA.S.Ac)/sqrt(length(BA.S.Ac))
+mean(BA.S.K)
+mean(BA.testMSE.S)
+mean(BA.AIC.S)
+
+
+```
+
+
+### Create fitted values, accuracies and Kappa for pdFVSVU
+
+Create predicted values of the response variable for the reserve dataset in order to calcualte confusion matrices, accuracies and kappa. 
+
+Gamlss phrases nu and tau as odds.  The code below converts these odds of nu or tau into probabilities of 0 or 1, respectively. The predicted values are computed using the continuous response (mu) as well as the probability of zero or one.   
+
+```{r SW RAVG pdFVSVU gamlss accuracies}
+#also run the simplest model for comparison
+
+#set up blank lists to store results
+adj.lim.pdFVSVU.S.Ac<-c()
+adj.lim.pdFVSVU.S.K<-c()
+adj.lim.pdFVSVU.testMSE.S<-c()
+adj.lim.pdFVSVU.AIC.S<-c()
+
+#create a blank vector to hold ifelse predictions, aka, predictions with asymptotes
+adj.lim.pdFVSVU.pred.S.if<-999
+
+for(i in 1:7){
+
+  #Segement your data by fold using the which() function 
+    testIndexes <- which(folds_f==i,arr.ind=TRUE)
+    SWRAVG_field_test <- SWRAVG_field[testIndexes, ]
+    SWRAVG_field_train <- SWRAVG_field[-testIndexes, ]
+
+adj.lim.pdFVSVU.simple<-gamlss(formula=adj.lim.pdFVSVU~S_IA_dnbr_with, sigma.formula=~S_IA_dnbr_with,nu.formula=~S_IA_dnbr_with, tau.formula=~S_IA_dnbr_with,family=BEINF,data=na.omit(SWRAVG_field_train))
+
+# extract new predictions for BEINF gamlss parameters for simple model
+adj.lim.pdFVSVU.simple.predAll <- predictAll(adj.lim.pdFVSVU.simple, newdata=SWRAVG_field_test, type="response") 
+  mu.adj.lim.pdFVSVU.s <- adj.lim.pdFVSVU.simple.predAll$mu
+  nu.adj.lim.pdFVSVU.s <- adj.lim.pdFVSVU.simple.predAll$nu
+  tau.adj.lim.pdFVSVU.s <- adj.lim.pdFVSVU.simple.predAll$tau
+  p0.adj.lim.pdFVSVU.s <- nu.adj.lim.pdFVSVU.s / (1+nu.adj.lim.pdFVSVU.s+tau.adj.lim.pdFVSVU.s) # propdabbility of zeros
+  p1.adj.lim.pdFVSVU.s <- tau.adj.lim.pdFVSVU.s / (1+nu.adj.lim.pdFVSVU.s+tau.adj.lim.pdFVSVU.s) # probability of ones
+
+# calculate expected value for new predictions for simple model
+yest.adj.lim.pdFVSVU.s.gamlss <- (1-p0.adj.lim.pdFVSVU.s)*(p1.adj.lim.pdFVSVU.s+(1-p1.adj.lim.pdFVSVU.s)*mu.adj.lim.pdFVSVU.s)
+
+adj.lim.pdFVSVU.testMSE.S.0<-mean((SWRAVG_field_test$adj.lim.pdFVSVU-yest.adj.lim.pdFVSVU.s.gamlss)^2) 
+adj.lim.pdFVSVU.testMSE.S<-c(adj.lim.pdFVSVU.testMSE.S,adj.lim.pdFVSVU.testMSE.S.0)
+adj.lim.pdFVSVU.AIC.S.0<-AIC(adj.lim.pdFVSVU.simple)
+adj.lim.pdFVSVU.AIC.S<-c(adj.lim.pdFVSVU.AIC.S,adj.lim.pdFVSVU.AIC.S.0)
+
+
+#first categorize the reserve pdPDFVSVU data 
+SWRAVG_field_test$adj.lim.pdFVSVU.cat=cut(SWRAVG_field_test$adj.lim.pdFVSVU,
+                  breaks=c(-Inf,0.0999,0.24999,0.4999,0.74999,0.8999, Inf),
+                labels=c("0-<10%","10-<25%","25-<50%","50-<75%","75-<90%","90-100%"))
+
+#then categorize the predicted data  
+yest.adj.lim.pdFVSVU.s.cat=cut(yest.adj.lim.pdFVSVU.s.gamlss,
+                  breaks=c(-Inf,0.0999,0.24999,0.4999,0.74999,0.8999, Inf),
+                labels=c("0-<10%","10-<25%","25-<50%","50-<75%","75-<90%","90-100%"))
+
+#Create Confusion Matrix
+adj.lim.pdFVSVU.S.conf<-confusionMatrix(yest.adj.lim.pdFVSVU.s.cat, SWRAVG_field_test$adj.lim.pdFVSVU.cat,  dnn = c("Prediction", "Reference"))
+print(adj.lim.pdFVSVU.S.conf)
+
+#access accuracy and Kappa
+adj.lim.pdFVSVU.conf.S.ac<-adj.lim.pdFVSVU.S.conf$overall["Accuracy"]
+adj.lim.pdFVSVU.conf.S.K<-adj.lim.pdFVSVU.S.conf$overall["Kappa"]
+
+#add accuracy and Kappa to lists
+adj.lim.pdFVSVU.S.Ac<-c(adj.lim.pdFVSVU.S.Ac,adj.lim.pdFVSVU.conf.S.ac)
+adj.lim.pdFVSVU.S.K<-c(adj.lim.pdFVSVU.S.K,adj.lim.pdFVSVU.conf.S.K)
+}
+
+#average the results across folds
+mean(adj.lim.pdFVSVU.S.Ac)
+sd(adj.lim.pdFVSVU.S.Ac)/sqrt(length(adj.lim.pdFVSVU.S.Ac))
+mean(adj.lim.pdFVSVU.S.K)
+mean(adj.lim.pdFVSVU.testMSE.S)
+mean(adj.lim.pdFVSVU.AIC.S)
+
+
+```
