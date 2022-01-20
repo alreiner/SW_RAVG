@@ -1,0 +1,555 @@
+---
+title: "SW RAVG final models July 2021"
+author: "Alicia Reiner"
+date: "19 Jan 2022"
+output: 
+  html_document: 
+    keep_md: yes
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Load Data and Packages
+
+first load field data
+
+then load PI dataset
+
+rescale CBI data so BEINF GAM distribution can be used (needs 0-1)
+
+Note: revisions made to tidy up graphs 11/17/2021
+
+```{r Southwest RAVG}
+SWRAVG_field=read.csv("RAVG_V18_field.csv",header=TRUE, sep=",")
+SWRAVG_PI=read.csv("RAVG_V18_PI.csv",header=TRUE, sep=",")
+SWRAVG=read.csv("RAVG_V18.csv",header=TRUE, sep=",")
+
+#create a combined field and PI canopy cover which uses an average if both are present.  
+SWRAVG$pdCC<-ifelse(SWRAVG$OS=="Y",((SWRAVG$adj.lim.pdFVSVU+SWRAVG$pdTreeCCloss)/2),ifelse(is.na(SWRAVG$pdTreeCCloss)=="TRUE",SWRAVG$adj.lim.pdFVSVU,SWRAVG$pdTreeCCloss))
+SWRAVG_field$pdCC<-ifelse(SWRAVG_field$OS=="Y",((SWRAVG_field$adj.lim.pdFVSVU+SWRAVG_field$pdTreeCCloss)/2),ifelse(is.na(SWRAVG_field$pdTreeCCloss)=="TRUE",SWRAVG_field$adj.lim.pdFVSVU,SWRAVG_field$pdTreeCCloss))
+
+#remove outlier
+SWRAVG_field<-SWRAVG_field[-which(SWRAVG_field$Plot=="BLUE11"),]
+SWRAVG<-SWRAVG[-which(SWRAVG$Plot=="BLUE11"),]
+
+CBI.B<-((1/3)*(SWRAVG_field$CBI-3)+1)
+SWRAVG_field<-cbind(CBI.B,SWRAVG_field)
+
+library(gamlss)
+library(ggplot2) 
+library(caret)
+library(GenKern)
+#had to install an older version of caret as package was not recognizing confMatrix()
+
+#fix data types up front
+SWRAVG_field$BPScode<-as.factor(SWRAVG_field$BPScode)
+SWRAVG_PI$BPScode<-as.factor(SWRAVG_PI$BPScode)
+SWRAVG$BPScode<-as.factor(SWRAVG$BPScode)
+
+
+```
+
+
+
+### CBI S_IA_dnbr_with
+
+build model on whole dataset
+test accuracy on whole dataset
+
+```{r SW RAVG CBI gamlss S_IA_dnbr_with}
+
+#rephrase results from stepGAICAll.A into the 'CBI.multivar' model below
+CBI.simple<-gamlss(formula=CBI.B~S_IA_dnbr_with, sigma.formula=~S_IA_dnbr_with, nu.formula=~S_IA_dnbr_with, tau.formula=~S_IA_dnbr_with,family=BEINF,data=na.omit(SWRAVG_field))
+
+CBI.simple
+
+# extract new predictions for BEINF gamlss parameters for simple model
+  CBI.simple.predAll <- predictAll(CBI.simple, newdata=SWRAVG_field, type="response") 
+  mu.CBI.s <- CBI.simple.predAll$mu
+  nu.CBI.s <- CBI.simple.predAll$nu
+  tau.CBI.s <- CBI.simple.predAll$tau
+  p0.CBI.s <- nu.CBI.s / (1+nu.CBI.s+tau.CBI.s) # probability of zeros
+  p1.CBI.s <- tau.CBI.s / (1+nu.CBI.s+tau.CBI.s) # probability of ones
+
+# calculate expected value for new predictions
+yest.CBI.s.gamlss.IA <- (1-p0.CBI.s)*(p1.CBI.s+(1-p1.CBI.s)*mu.CBI.s)
+
+#create confusion matrix for multivariate gamlss predictions
+
+#first categorize the reserve CBI data (the CBI.B variable on 0-1 scale)
+SWRAVG_field$CBI.cat=cut(SWRAVG_field$CBI.B,
+                breaks=c(-Inf,0.0329,0.415,0.749,Inf),
+                labels=c("0-<0.1","0.1-<1.25","1.25-<2.25","2.25-3"))
+
+#then categorize the predicted data  
+yest.CBI.s.cat=cut(yest.CBI.s.gamlss.IA,
+                breaks=c(-Inf,0.0329,0.415,0.749,Inf),
+                labels=c("0-<0.1","0.1-<1.25","1.25-<2.25","2.25-3"))
+
+#Create Confusion Matrix
+CBI.S.conf<-confusionMatrix(yest.CBI.s.cat, SWRAVG_field$CBI.cat,  dnn = c("Prediction", "Reference"))
+print(CBI.S.conf)
+
+CBI.testMSE<-mean((SWRAVG_field$CBI.B-yest.CBI.s.gamlss.IA)^2)
+CBI.testMSE
+
+plot(SWRAVG_field$S_IA_dnbr_with,yest.CBI.s.gamlss.IA, xlab="IA Sentinel-2 dNBR with offset", ylab="Predicted CBI")
+plot(SWRAVG_field$CBI,yest.CBI.s.gamlss.IA, xlab="CBI", ylab="Predicted CBI")
+
+```
+
+
+###  BA gamlss S_IA_dnbr_with
+
+BA simple gamlss run on whole dataset 
+
+```{r SW RAVG BA gamlss S_IA_dnbr_with}
+
+
+BA.simple<-gamlss(formula=pdBA~S_IA_dnbr_with, sigma.formula=~S_IA_dnbr_with,nu.formula=~S_IA_dnbr_with, tau.formula=~S_IA_dnbr_with,family=BEINF,data=na.omit(SWRAVG_field))
+
+BA.simple
+
+# extract new predictions for BEINF gamlss parameters for simple model
+  BA.simple.predAll <- predictAll(BA.simple, newdata=SWRAVG_field, type="response") 
+  mu.BA.s <- BA.simple.predAll$mu
+  nu.BA.s <- BA.simple.predAll$nu
+  tau.BA.s <- BA.simple.predAll$tau
+  p0.BA.s <- nu.BA.s / (1+nu.BA.s+tau.BA.s) # probability of zeros
+  p1.BA.s <- tau.BA.s / (1+nu.BA.s+tau.BA.s) # probability of ones
+
+# calculate expected value for new predictions for simple model
+yest.BA.s.gamlss.IA <- (1-p0.BA.s)*(p1.BA.s+(1-p1.BA.s)*mu.BA.s)
+
+#first categorize the reserve pdBA data 
+SWRAVG_field$pdBA.cat=cut(SWRAVG_field$pdBA,
+                    breaks=c(-Inf,0.0999,0.24999,0.4999,0.74999,0.8999, Inf),
+                labels=c("0-<10%","10-<25%","25-<50%","50-<75%","75-<90%","90-100%"))
+
+#then categorize the predicted data  
+yest.BA.s.cat=cut(yest.BA.s.gamlss.IA,
+                    breaks=c(-Inf,0.0999,0.24999,0.4999,0.74999,0.8999, Inf),
+                labels=c("0-<10%","10-<25%","25-<50%","50-<75%","75-<90%","90-100%"))
+
+#Create Confusion Matrix
+BA.S.conf<-confusionMatrix(yest.BA.s.cat, SWRAVG_field$pdBA.cat,  dnn = c("Prediction", "Reference"))
+print(BA.S.conf)
+
+BA.testMSE<-mean((SWRAVG_field$pdBA-yest.BA.s.gamlss.IA)^2)
+BA.testMSE
+
+plot(SWRAVG_field$S_IA_dnbr_with,yest.BA.s.gamlss.IA, xlab="IA Sentinel-2 dNBR with offset", ylab="Predicted percent BA change")
+plot(SWRAVG_field$pdBA,yest.BA.s.gamlss.IA, xlab="Percent BA change", ylab="Predicted percent BA change")
+
+
+```
+
+
+
+### adj.lim.pdFVSVU gamlss S_IA_dnbr_with
+
+on whole dataset
+
+```{r SW RAVG adj.lim.pdFVSVU gamlss S_IA_dnbr_with}
+
+
+adj.lim.pdFVSVU.simple<-gamlss(formula=adj.lim.pdFVSVU~S_IA_dnbr_with, sigma.formula=~S_IA_dnbr_with,nu.formula=~S_IA_dnbr_with, tau.formula=~S_IA_dnbr_with,family=BEINF,data=na.omit(SWRAVG_field))
+
+adj.lim.pdFVSVU.simple
+
+# extract new predictions for BEINF gamlss parameters for simple model
+adj.lim.pdFVSVU.simple.predAll <- predictAll(adj.lim.pdFVSVU.simple, newdata=SWRAVG_field, type="response") 
+  mu.adj.lim.pdFVSVU.s <- adj.lim.pdFVSVU.simple.predAll$mu
+  nu.adj.lim.pdFVSVU.s <- adj.lim.pdFVSVU.simple.predAll$nu
+  tau.adj.lim.pdFVSVU.s <- adj.lim.pdFVSVU.simple.predAll$tau
+  p0.adj.lim.pdFVSVU.s <- nu.adj.lim.pdFVSVU.s / (1+nu.adj.lim.pdFVSVU.s+tau.adj.lim.pdFVSVU.s) # propdabbility of zeros
+  p1.adj.lim.pdFVSVU.s <- tau.adj.lim.pdFVSVU.s / (1+nu.adj.lim.pdFVSVU.s+tau.adj.lim.pdFVSVU.s) # probability of ones
+
+# calculate expected value for new predictions for simple model
+yest.adj.lim.pdFVSVU.s.gamlss.IA <- (1-p0.adj.lim.pdFVSVU.s)*(p1.adj.lim.pdFVSVU.s+(1-p1.adj.lim.pdFVSVU.s)*mu.adj.lim.pdFVSVU.s)
+
+
+#first categorize the reserve pdBA data 
+SWRAVG_field$adj.lim.pdFVSVU.cat=cut(SWRAVG_field$adj.lim.pdFVSVU,
+                    breaks=c(-Inf,0.0999,0.24999,0.4999,0.74999,0.8999, Inf),
+                labels=c("0-<10%","10-<25%","25-<50%","50-<75%","75-<90%","90-100%"))
+
+#then categorize the predicted data  
+yest.adj.lim.pdFVSVU.s.cat=cut(yest.adj.lim.pdFVSVU.s.gamlss.IA,
+                    breaks=c(-Inf,0.0999,0.24999,0.4999,0.74999,0.8999, Inf),
+                labels=c("0-<10%","10-<25%","25-<50%","50-<75%","75-<90%","90-100%"))
+
+#Create Confusion Matrix
+adj.lim.pdFVSVU.S.conf<-confusionMatrix(yest.adj.lim.pdFVSVU.s.cat, SWRAVG_field$adj.lim.pdFVSVU.cat,  dnn = c("Prediction", "Reference"))
+print(adj.lim.pdFVSVU.S.conf)
+
+CC.testMSE<-mean((SWRAVG_field$adj.lim.pdFVSVU-yest.adj.lim.pdFVSVU.s.gamlss.IA)^2)
+CC.testMSE
+
+plot(SWRAVG_field$S_IA_dnbr_with,yest.adj.lim.pdFVSVU.s.gamlss.IA, xlab="IA Sentinel-2 dNBR with offset", ylab="Predicted percent CC change")
+plot(SWRAVG_field$adj.lim.pdFVSVU,yest.adj.lim.pdFVSVU.s.gamlss.IA, xlab="Percent CC change", ylab="Predicted percent CC change")
+
+```
+
+
+
+### CBI S_EA_rbr_with
+
+build model on whole dataset
+test accuracy on whole dataset
+
+```{r SW RAVG CBI gamlss S_EA_nbr_with}
+
+#rephrase results from stepGAICAll.A into the 'CBI.multivar' model below
+CBI.simple<-gamlss(formula=CBI.B~S_EA_rbr_with, sigma.formula=~S_EA_rbr_with, nu.formula=~S_EA_rbr_with, tau.formula=~S_EA_rbr_with,family=BEINF,data=na.omit(SWRAVG_field))
+
+CBI.simple
+
+# extract new predictions for BEINF gamlss parameters for simple model
+  CBI.simple.predAll <- predictAll(CBI.simple, newdata=SWRAVG_field, type="response") 
+  mu.CBI.s <- CBI.simple.predAll$mu
+  nu.CBI.s <- CBI.simple.predAll$nu
+  tau.CBI.s <- CBI.simple.predAll$tau
+  p0.CBI.s <- nu.CBI.s / (1+nu.CBI.s+tau.CBI.s) # probability of zeros
+  p1.CBI.s <- tau.CBI.s / (1+nu.CBI.s+tau.CBI.s) # probability of ones
+
+# calculate expected value for new predictions
+yest.CBI.s.gamlss <- (1-p0.CBI.s)*(p1.CBI.s+(1-p1.CBI.s)*mu.CBI.s)
+
+#create confusion matrix for multivariate gamlss predictions
+
+#first categorize the reserve CBI data (the CBI.B variable on 0-1 scale)
+SWRAVG_field$CBI.cat=cut(SWRAVG_field$CBI.B,
+                breaks=c(-Inf,0.0329,0.415,0.749,Inf),
+                labels=c("0-<0.1","0.1-<1.25","1.25-<2.25","2.25-3"))
+
+#then categorize the predicted data  
+yest.CBI.s.cat=cut(yest.CBI.s.gamlss,
+                breaks=c(-Inf,0.0329,0.415,0.749,Inf),
+                labels=c("0-<0.1","0.1-<1.25","1.25-<2.25","2.25-3"))
+
+#Create Confusion Matrix
+CBI.S.conf<-confusionMatrix(yest.CBI.s.cat, SWRAVG_field$CBI.cat,  dnn = c("Prediction", "Reference"))
+print(CBI.S.conf)
+
+CBI2.testMSE<-mean((SWRAVG_field$CBI.B-yest.CBI.s.gamlss)^2)
+CBI2.testMSE
+
+plot(SWRAVG_field$S_EA_rbr_with,yest.CBI.s.gamlss, xlab="EA Sentinel-2 RBR with offset", ylab="Predicted CBI")
+plot(SWRAVG_field$CBI,yest.CBI.s.gamlss, xlab="CBI", ylab="Predicted CBI")
+
+```
+
+
+###  BA gamlss S_EA_rbr_with
+
+BA simple gamlss run on whole dataset 
+
+```{r SW RAVG BA gamlss S_EA_rbr_with}
+
+
+BA.simple<-gamlss(formula=pdBA~S_EA_rbr_with, sigma.formula=~S_EA_rbr_with,nu.formula=~S_EA_rbr_with, tau.formula=~S_EA_rbr_with,family=BEINF,data=na.omit(SWRAVG_field))
+
+BA.simple
+
+# extract new predictions for BEINF gamlss parameters for simple model
+  BA.simple.predAll <- predictAll(BA.simple, newdata=SWRAVG_field, type="response") 
+  mu.BA.s <- BA.simple.predAll$mu
+  nu.BA.s <- BA.simple.predAll$nu
+  tau.BA.s <- BA.simple.predAll$tau
+  p0.BA.s <- nu.BA.s / (1+nu.BA.s+tau.BA.s) # probability of zeros
+  p1.BA.s <- tau.BA.s / (1+nu.BA.s+tau.BA.s) # probability of ones
+
+# calculate expected value for new predictions for simple model
+yest.BA.s.gamlss <- (1-p0.BA.s)*(p1.BA.s+(1-p1.BA.s)*mu.BA.s)
+
+#first categorize the reserve pdBA data 
+SWRAVG_field$pdBA.cat=cut(SWRAVG_field$pdBA,
+                 breaks=c(-Inf,0.0999,0.24999,0.4999,0.74999,0.8999, Inf),
+                labels=c("0-<10%","10-<25%","25-<50%","50-<75%","75-<90%","90-100%"))
+#then categorize the predicted data  
+yest.BA.s.cat=cut(yest.BA.s.gamlss,
+               breaks=c(-Inf,0.0999,0.24999,0.4999,0.74999,0.8999, Inf),
+                labels=c("0-<10%","10-<25%","25-<50%","50-<75%","75-<90%","90-100%"))
+
+#Create Confusion Matrix
+BA.S.conf<-confusionMatrix(yest.BA.s.cat, SWRAVG_field$pdBA.cat,  dnn = c("Prediction", "Reference"))
+print(BA.S.conf)
+
+BA2.testMSE<-mean((SWRAVG_field$pdBA-yest.BA.s.gamlss)^2)
+BA2.testMSE
+
+plot(SWRAVG_field$S_EA_rbr_with,yest.BA.s.gamlss, xlab="EA Sentinel-2 RBR with offset", ylab="Predicted percent BA change")
+plot(SWRAVG_field$pdBA,yest.BA.s.gamlss, xlab="Percent BA change", ylab="Predicted percent BA change")
+
+
+```
+
+
+
+### adj.lim.pdFVSVU gamlss S_EA_rbr_with
+
+on whole dataset
+
+```{r SW RAVG adj.lim.pdFVSVU gamlss S_EA_rbr_with}
+
+
+adj.lim.pdFVSVU.simple<-gamlss(formula=adj.lim.pdFVSVU~S_EA_rbr_with, sigma.formula=~S_EA_rbr_with,nu.formula=~S_EA_rbr_with, tau.formula=~S_EA_rbr_with,family=BEINF,data=na.omit(SWRAVG_field))
+
+adj.lim.pdFVSVU.simple
+
+# extract new predictions for BEINF gamlss parameters for simple model
+adj.lim.pdFVSVU.simple.predAll <- predictAll(adj.lim.pdFVSVU.simple, newdata=SWRAVG_field, type="response") 
+  mu.adj.lim.pdFVSVU.s <- adj.lim.pdFVSVU.simple.predAll$mu
+  nu.adj.lim.pdFVSVU.s <- adj.lim.pdFVSVU.simple.predAll$nu
+  tau.adj.lim.pdFVSVU.s <- adj.lim.pdFVSVU.simple.predAll$tau
+  p0.adj.lim.pdFVSVU.s <- nu.adj.lim.pdFVSVU.s / (1+nu.adj.lim.pdFVSVU.s+tau.adj.lim.pdFVSVU.s) # propdabbility of zeros
+  p1.adj.lim.pdFVSVU.s <- tau.adj.lim.pdFVSVU.s / (1+nu.adj.lim.pdFVSVU.s+tau.adj.lim.pdFVSVU.s) # probability of ones
+
+# calculate expected value for new predictions for simple model
+yest.adj.lim.pdFVSVU.s.gamlss <- (1-p0.adj.lim.pdFVSVU.s)*(p1.adj.lim.pdFVSVU.s+(1-p1.adj.lim.pdFVSVU.s)*mu.adj.lim.pdFVSVU.s)
+
+#first categorize the reserve pdBA data 
+SWRAVG_field$adj.lim.pdFVSVU.cat=cut(SWRAVG_field$adj.lim.pdFVSVU,
+                           breaks=c(-Inf,0.0999,0.24999,0.4999,0.74999,0.8999, Inf),
+                labels=c("0-<10%","10-<25%","25-<50%","50-<75%","75-<90%","90-100%"))
+
+#then categorize the predicted data  
+yest.adj.lim.pdFVSVU.s.cat=cut(yest.adj.lim.pdFVSVU.s.gamlss,
+                           breaks=c(-Inf,0.0999,0.24999,0.4999,0.74999,0.8999, Inf),
+                labels=c("0-<10%","10-<25%","25-<50%","50-<75%","75-<90%","90-100%"))
+
+#Create Confusion Matrix
+adj.lim.pdFVSVU.S.conf<-confusionMatrix(yest.adj.lim.pdFVSVU.s.cat, SWRAVG_field$adj.lim.pdFVSVU.cat,  dnn = c("Prediction", "Reference"))
+print(adj.lim.pdFVSVU.S.conf)
+
+CC2.testMSE<-mean((SWRAVG_field$adj.lim.pdFVSVU-yest.adj.lim.pdFVSVU.s.gamlss)^2)
+CC2.testMSE
+
+plot(SWRAVG_field$S_EA_rbr_with,yest.adj.lim.pdFVSVU.s.gamlss, xlab="EA Sentinel-2 RBR with offset", ylab="Predicted percent CC change")
+plot(SWRAVG_field$adj.lim.pdFVSVU,yest.adj.lim.pdFVSVU.s.gamlss, xlab="Percent CC change", ylab="Predicted percent CC change")
+
+```
+
+
+
+### CBI Confusion Matrices (Miller) EA
+
+Now running a confusion Matrix where predictions are from the standard RAVG (Miller) equation 
+
+model run on RdNBR, the predictor for Miller equations
+
+```{r SW RAVG CBI Confusion Matrix Miller EA}
+
+CBI.pred.Miller<-ifelse(SWRAVG_field$L_EA_rdnbr_with<53, 0, ifelse(SWRAVG_field$L_EA_rdnbr_with>=986, 3, (1/0.389)*log((SWRAVG_field$L_EA_rdnbr_with+369)/421.7)))
+
+
+#categorize Miller predictions
+
+CBI.pred.Miller.cat=cut(CBI.pred.Miller,
+                breaks=c(-Inf,0.99,1.249,2.249,Inf),
+                      labels=c("0-<0.1","0.1-<1.25","1.25-<2.25","2.25-3"))
+
+#use categorized predicted data and Miller predictions, both for whole set, in confusion matrix
+
+#categorize the reserve CBI data
+SWRAVG_field$CBI.cat=cut(SWRAVG_field$CBI.B,
+                   breaks=c(-Inf,0.0329,0.415,0.749,Inf),
+                labels=c("0-<0.1","0.1-<1.25","1.25-<2.25","2.25-3"))
+
+
+#print("Confusion Matrix for Miller CBI model")
+Miller.CBI.conf<-confusionMatrix(CBI.pred.Miller.cat, SWRAVG_field$CBI.cat, dnn = c("Prediction", "Reference"))
+
+print(Miller.CBI.conf)
+
+CBIMiller.testMSE<-mean((SWRAVG_field$CBI.B-CBI.pred.Miller)^2)
+CBIMiller.testMSE
+
+plot(SWRAVG_field$L_EA_rdnbr_with,CBI.pred.Miller, xlab="EA Landsat RdNBR with offset", ylab="Predicted CBI")
+plot(SWRAVG_field$CBI,CBI.pred.Miller, xlab="CBI", ylab="Predicted CBI")
+
+
+```
+
+
+
+### BA Confusion Matrices (Miller) using equations from document for EA
+
+Now running a confusion Matrix where predictions are from the standard RAVG (Miller) equation 
+
+model run on RdNBR, the predictor for Miller equations
+
+```{r SW RAVG BA Confusion Matrix Miller EA}
+
+  
+BA.pred.Miller<-ifelse(SWRAVG_field$L_EA_rdnbr_with<167, 0, ifelse(SWRAVG_field$L_EA_rdnbr_with>=778, 1, (sin((SWRAVG_field$L_EA_rdnbr_with-166.5)/389))))
+
+#then categorize the predicted data  
+BA.pred.Miller.cat=cut(BA.pred.Miller,
+                             breaks=c(-Inf,0.0999,0.24999,0.4999,0.74999,0.8999, Inf),
+                labels=c("0-<10%","10-<25%","25-<50%","50-<75%","75-<90%","90-100%"))
+
+#first categorize the reserve pdBA data 
+SWRAVG_field$pdBA.cat=cut(SWRAVG_field$pdBA,
+                    breaks=c(-Inf,0.0999,0.24999,0.4999,0.74999,0.8999, Inf),
+                labels=c("0-<10%","10-<25%","25-<50%","50-<75%","75-<90%","90-100%"))
+#use categorized predicted data and Miller predictions, both for whole data set, in confusion matrix
+
+#print("Confusion Matrix for Miller BA model using equations from document")
+Miller.BA.conf<-confusionMatrix(BA.pred.Miller.cat, SWRAVG_field$pdBA.cat,  dnn = c("Prediction", "Reference"))
+print(Miller.BA.conf)
+
+BAMiller.testMSE<-mean((SWRAVG_field$pdBA-BA.pred.Miller)^2)
+BAMiller.testMSE
+
+plot(SWRAVG_field$L_EA_rdnbr_with,BA.pred.Miller, xlab="EA Landsat RdNBR with offset", ylab="Predicted percent BA change")
+plot(SWRAVG_field$pdBA,BA.pred.Miller, xlab="Percent BA change", ylab="Predicted percent BA change")
+
+```
+
+
+
+### CC loss Confusion Matrices (Miller) using equations from document for EA
+
+Now running a confusion Matrix where predictions are from the standard RAVG (Miller) equation
+
+model run on RdNBR, the predictor for Miller equations
+
+```{r SW RAVG CCloss Confusion Matrix Miller for EA}
+
+
+CC.pred.Miller<-ifelse(SWRAVG_field$L_EA_rdnbr_with<161, 0, ifelse(SWRAVG_field$L_EA_rdnbr_with>=778, 1, (sin((SWRAVG_field$L_EA_rdnbr_with-161)/392.6))))
+
+#then categorize the predicted data  
+CC.pred.Miller.cat=cut(CC.pred.Miller,
+                          breaks=c(-Inf,0.0999,0.24999,0.4999,0.74999,0.8999, Inf),
+                labels=c("0-<10%","10-<25%","25-<50%","50-<75%","75-<90%","90-100%"))
+
+#use categorized predicted data and Miller predictions, both for whole set, in confusion matrix
+
+#print("Confusion Matrix for Miller CC model using equations from document")
+Miller.CC.conf<-confusionMatrix(CC.pred.Miller.cat, SWRAVG_field$adj.lim.pdFVSVU.cat,  dnn = c("Prediction", "Reference"))
+print(Miller.CC.conf)
+
+CCMiller.testMSE<-mean((SWRAVG_field$adj.lim.pdFVSVU-CC.pred.Miller)^2)
+CCMiller.testMSE
+
+plot(SWRAVG_field$L_EA_rdnbr_with,CC.pred.Miller, xlab="EA Landsat RdNBR with offset", ylab="Predicted percent CC change")
+plot(SWRAVG_field$adj.lim.pdFVSVU,CC.pred.Miller, xlab="Percent CC change", ylab="Predicted percent CC change")
+
+
+```
+
+
+
+
+### CBI Confusion Matrices (Miller) IA
+
+Now running a confusion Matrix where predictions are from the standard RAVG (Miller) equation 
+
+model run on RdNBR, the predictor for Miller equations
+
+```{r SW RAVG CBI Confusion Matrix Miller IA}
+
+CBI.pred.Miller.IA<-ifelse(SWRAVG_field$L_EA_rdnbr_with<60, 0, ifelse(SWRAVG_field$L_EA_rdnbr_with>=1127, 3, (1/0.389)*log(((SWRAVG_field$L_EA_rdnbr_with/1.1438)+369)/421.7)))
+
+
+#categorize Miller predictions
+
+CBI.pred.Miller.cat.IA=cut(CBI.pred.Miller.IA,
+                breaks=c(-Inf,0.99,1.249,2.249,Inf),
+               labels=c("0-<0.1","0.1-<1.25","1.25-<2.25","2.25-3"))
+
+#use categorized predicted data and Miller predictions, both for whole set, in confusion matrix
+
+#print("Confusion Matrix for Miller CBI model")
+Miller.CBI.conf.IA<-confusionMatrix(CBI.pred.Miller.cat.IA, SWRAVG_field$CBI.cat, dnn = c("Prediction", "Reference"))
+
+print(Miller.CBI.conf.IA)
+
+CBIMillerIA.testMSE<-mean((SWRAVG_field$CBI.B-CBI.pred.Miller.IA)^2)
+CBIMillerIA.testMSE
+
+plot(SWRAVG_field$L_EA_rdnbr_with,CBI.pred.Miller.IA, xlab="IA Landsat RdNBR with offset", ylab="Predicted CBI")
+plot(SWRAVG_field$CBI,CBI.pred.Miller.IA, xlab="CBI", ylab="Predicted CBI")
+
+
+```
+
+
+
+### BA Confusion Matrices (Miller) using equations from document for IA
+
+Now running a confusion Matrix where predictions are from the standard RAVG (Miller) equation 
+
+model run on RdNBR, the predictor for Miller equations
+
+```{r SW RAVG BA Confusion Matrix Miller IA}
+
+  
+BA.pred.Miller.IA<-ifelse(SWRAVG_field$L_EA_rdnbr_with<190, 0, ifelse(SWRAVG_field$L_EA_rdnbr_with>=889, 1, (sin((((SWRAVG_field$L_EA_rdnbr_with/1.1438)-166.5)/389))^2)))
+
+#then categorize the predicted data  
+BA.pred.Miller.cat.IA=cut(BA.pred.Miller.IA,
+                             breaks=c(-Inf,0.0999,0.24999,0.4999,0.74999,0.8999, Inf),
+                labels=c("0-<10%","10-<25%","25-<50%","50-<75%","75-<90%","90-100%"))
+#first categorize the reserve pdBA data 
+SWRAVG_field$pdBA.cat=cut(SWRAVG_field$pdBA,
+                    breaks=c(-Inf,0.0999,0.24999,0.4999,0.74999,0.8999, Inf),
+                labels=c("0-<10%","10-<25%","25-<50%","50-<75%","75-<90%","90-100%"))
+
+#use categorized predicted data and Miller predictions, both for whole data set, in confusion matrix
+
+#print("Confusion Matrix for Miller BA model using equations from document")
+Miller.BA.conf.IA<-confusionMatrix(BA.pred.Miller.cat.IA, SWRAVG_field$pdBA.cat,  dnn = c("Prediction", "Reference"))
+print(Miller.BA.conf.IA)
+
+BAMillerIA.testMSE<-mean((SWRAVG_field$pdBA-BA.pred.Miller.IA)^2)
+BAMillerIA.testMSE
+
+plot(SWRAVG_field$L_EA_rdnbr_with,BA.pred.Miller.IA, xlab="IA Landsat RdNBR with offset", ylab="Predicted percent BA change")
+plot(SWRAVG_field$pdBA,BA.pred.Miller.IA, xlab="Percent BA change", ylab="Predicted percent BA change")
+
+
+```
+
+
+
+### CC loss Confusion Matrices (Miller) using equations from document for IA
+
+Now running a confusion Matrix where predictions are from the standard RAVG (Miller) equation
+
+model run on RdNBR, the predictor for Miller equations
+
+```{r SW RAVG CCloss Confusion Matrix Miller for IA}
+
+
+CC.pred.Miller.IA<-ifelse(SWRAVG_field$L_IA_rdnbr_with<184, 0, ifelse(SWRAVG_field$L_IA_rdnbr_with>=890, 1, (sin((((SWRAVG_field$L_IA_rdnbr_with/1.1438)-161)/392.6))^2)))
+
+#then categorize the predicted data  
+CC.pred.Miller.cat.IA=cut(CC.pred.Miller,
+                             breaks=c(-Inf,0.0999,0.24999,0.4999,0.74999,0.8999, Inf),
+                labels=c("0-<10%","10-<25%","25-<50%","50-<75%","75-<90%","90-100%"))
+
+
+#use categorized predicted data and Miller predictions, both for whole set, in confusion matrix
+
+#print("Confusion Matrix for Miller CC model using equations from document")
+Miller.CC.conf.IA<-confusionMatrix(CC.pred.Miller.cat.IA, SWRAVG_field$adj.lim.pdFVSVU.cat,  dnn = c("Prediction", "Reference"))
+print(Miller.CC.conf.IA)
+
+CCMillerIA.testMSE<-mean((SWRAVG_field$adj.lim.pdFVSVU-CC.pred.Miller.IA)^2)
+CCMillerIA.testMSE
+
+plot(SWRAVG_field$L_IA_rdnbr_with,CC.pred.Miller.IA, xlab="IA Landsat RdNBR with offset", ylab="Predicted percent CC change")
+plot(SWRAVG_field$adj.lim.pdFVSVU,CC.pred.Miller.IA, xlab="Percent CC change", ylab="Predicted percent CC change")
+
+
+```
+
+
+
+
