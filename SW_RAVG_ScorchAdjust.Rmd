@@ -1,0 +1,104 @@
+---
+title: "SW RAVG FVS canopy cover adjustment"
+author: "Alicia Reiner"
+date: "6/16/2021"
+output: 
+  html_document: 
+    keep_md: yes
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+The purpose of this code is to create adjust post-fire canopy cover, and canopy cover change with fire for scorch because FVS canopy cover does not account for crown cover loss due to scorch.
+
+## Load Data and Packages
+
+Load all of field data and subset out the 'oversampled' plots, 
+those for which we have both field and Photo interp methods.  
+
+```{r Southwest RAVG}
+SWRAVG=read.csv("RAVG_V18.csv",header=TRUE, sep=",")
+
+#subset out just the OS plots (rows,cols)
+SWRAVG.OS<-SWRAVG[which(SWRAVG$OS=="Y"),]
+
+#create difference between pdFVSVU and pdTreeCCloss
+d_dFVSVU.dPI<-SWRAVG.OS$pdFVSVU-SWRAVG.OS$pdTreeCCloss
+SWRAVG.OS<-cbind(SWRAVG.OS,d_dFVSVU.dPI)
+
+library(FNN)
+library(smatr)
+
+plot(SWRAVG.OS$pdFVSVU,SWRAVG.OS$pdTreeCCloss)
+plot(SWRAVG.OS$W_PctGrn_Tree,SWRAVG.OS$pdTreeCCloss)
+plot(SWRAVG.OS$W_PctGrn_Tree,SWRAVG.OS$pdFVSVU)
+
+```
+
+
+### build KNN regression for prediction
+
+next task is to create KNN regression from all tst and trn data (all OS plots)
+and then create predictions for the difference in dcancov between methods using (overall) CBI
+
+
+```{r SW RAVG build KNN}
+#create x and y for knn reg:
+x_RAVG.OS=SWRAVG.OS["W_PctGrn_Tree"]
+y_RAVG.OS=SWRAVG.OS["d_dFVSVU.dPI"]
+
+# need to import all field data .csv for 'xnew', the new data for which the knn will make predictions
+SWRAVG.Field=read.csv("RAVG_V18_field.csv", header=TRUE, sep=",")
+
+RAVG_pctG=SWRAVG.Field["W_PctGrn_Tree"]
+
+#create a knn regression from just the OS plots and make predictions on the entire field dataset
+pred_knn_All = FNN::knn.reg(train = x_RAVG.OS, test = RAVG_pctG, y=y_RAVG.OS, k=24)
+
+#look at the values of adjustment
+summary(pred_knn_All$pred)
+plot(SWRAVG.Field$W_PctGrn_Tree,pred_knn_All$pred, xlab="Tree portion of CBI", ylab="KNN regression prediction")
+
+### Create adjustment
+adj2.pdFVSVU<-SWRAVG.Field$pdFVSVU-pred_knn_All$pred
+SWRAVG.Field<-cbind(SWRAVG.Field, adj2.pdFVSVU)
+
+#limit adjustment to 100% and only apply where W_PctGrn_Tree>0.5
+adj.lim.pdFVSVU<-ifelse(SWRAVG.Field$adj2.pdFVSVU>1,1,ifelse(SWRAVG.Field$W_PctGrn_Tree<0.5,SWRAVG.Field$pdFVSVU,SWRAVG.Field$adj2.pdFVSVU))
+#bind to dataframe
+SWRAVG.Field<-cbind(SWRAVG.Field,adj.lim.pdFVSVU)
+
+#resubset to create OS graphs
+SWRAVG.OS.2<-SWRAVG.Field[which(SWRAVG.Field$OS=="Y"),]
+
+plot(SWRAVG.OS.2$pdTreeCCloss,SWRAVG.OS.2$adj2.pdFVSVU)
+
+plot(SWRAVG.OS.2$pdTreeCCloss,SWRAVG.OS.2$adj.lim.pdFVSVU, xlim=c(0,1), ylim=c(0,1), xlab="Photo interpretation canopy cover change", ylab="Adjusted FVS canopy cover change", abline(coef = c(0,1)))
+
+
+```
+
+### Slope Test
+
+Now go back to just the OS plots and see if slope between pdTreeCCloss and adj.lim.pdFVSVU are 1, meaning that the data are essentially saying the same thing.
+
+
+```{r SW RAVG slope test}
+
+#slope test with pdFVSVU adjusted
+with(SWRAVG.OS.2,slope.test(SWRAVG.OS.2$adj.lim.pdFVSVU, SWRAVG.OS.2$pdTreeCCloss, test.value=1, intercept=FALSE, method=0, alpha=0.1))
+
+lm.fit.dif=lm(adj.lim.pdFVSVU~0+pdTreeCCloss,SWRAVG.OS.2)
+summary(lm.fit.dif)
+
+#write the adjustment to csv
+write.csv(SWRAVG.Field,"RAVG_adjpdFVSVU_field.csv",sep = ",")
+
+#added Nov 3, 2021: same plot as above, but with regression
+
+plot(SWRAVG.OS.2$pdTreeCCloss,SWRAVG.OS.2$adj.lim.pdFVSVU, xlim=c(0,1), ylim=c(0,1), xlab="PI CC change", ylab="Scorch-adjusted FVS CC change", abline(lm.fit.dif))
+
+```
+
